@@ -78,8 +78,8 @@ sim_trial <- function(
     
     # Fit model
     moddat <- tidybayes::compose_data(run_dat, model[[2]])
-    fit <- rstan::sampling(model[[1]], data = moddat, pars = "theta", ...)
-    draws <- tidybayes::gather_draws(fit, theta[d]) 
+    fit <- rstan::sampling(model[[1]], data = moddat, pars = c("theta", "zeta"), ...)
+    draws <- tidybayes::gather_draws(fit, theta[d], zeta[d]) 
     dat[[k]] <- as_tibble(run_dat)
     
     
@@ -90,13 +90,10 @@ sim_trial <- function(
     theta[[k]] <- draws %>% 
       median_hdci()
     
-    # Difference between maximum duration
-    th <- as.matrix(fit, "theta")
-    prob_noninf[[k]] <- as_tibble(sweep(th[, 1:(N-1)], 1, th[, N], "-")) %>%
-      gather(d, .value) %>% 
-      mutate(d = str_extract(d, "[0-9]+")) %>%
-      group_by(d) %>%
-      summarise(prob_noninf = mean(.value > -delta))
+    # Relative to maximum
+    prob_noninf[[k]] <- draws %>%
+      filter(.variable == "zeta") %>%
+      summarise(prob_noninf = mean(.value >= -delta))
     
     # Efficacy of duration wrt epsilon
     prob_eff[[k]] <- draws %>%
