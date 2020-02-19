@@ -44,6 +44,7 @@ sim_trial <- function(
   epsilon = 0.9, 
   delta = 0.05,
   rar = FALSE,
+  fix_max_dur = FALSE,
   use_failures = FALSE, 
   ...) {
   
@@ -97,22 +98,25 @@ sim_trial <- function(
     
     # Efficacy of duration wrt epsilon
     prob_eff[[k]] <- draws %>%
+      filter(.variable == "theta") %>%
       summarise(prob_eff = mean(.value >= epsilon))
     
     # MED wrt epsilon
     prob_med[[k]] <- draws %>%
+      filter(.variable == "theta") %>%
       group_by(.variable, .draw) %>%
       mutate(med1 = .value >= epsilon,
              med2 = lag(.value, 1, 0) < epsilon,
              med3 = med1 & med2) %>%
       group_by(d) %>%
       summarise(prob_eff = mean(med1),
-                prob_lageff = mean(med2),
+                prob_lageff = mean(1 - med2),
                 prob_med = mean(med3))
     
     # Probability bounded
-    prob_bnd[[k]] <- draws %>%
-      summarise(prob_bnd = mean(.value >= epsilon & .value < epsilon + 0.05))
+    # prob_bnd[[k]] <- draws %>%
+    #   filter(.variable == "theta") %>%
+    #   summarise(prob_bnd = mean(.value >= epsilon & .value < epsilon + 0.05))
     
     # Update allocation ratios according to MED prob
     # (if ALL prob_med = 0 or ALL prob_eff < alpha, stop?)
@@ -120,7 +124,16 @@ sim_trial <- function(
       if(!rar) {
         alloc_ratio[[k + 1]] <- rep(1 / N, N)
       } else {
-        alloc_ratio[[k + 1]] <- sqrt(prob_med[[k]]$prob_med)  
+        if(!fix_max_dur) {
+          alloc_ratio[[k + 1]] <- sqrt(prob_med[[k]]$prob_med)    
+        } else {
+          w <- sqrt(prob_med[[k]]$prob_med)
+          w <- w / sum(w)
+          w[N] <- fix_max_dur
+          w[-N] <- (1 - w[N])*w[-N]
+          alloc_ratio[[k + 1]] <- w
+        }
+        
       }
     }
   }
