@@ -49,6 +49,7 @@ sim_trial <- function(
   ...) {
   
   require(rstan)
+  require(plyr)
   require(dplyr)
   require(tidybayes)
   
@@ -76,12 +77,12 @@ sim_trial <- function(
       run_dat$n <- run_dat$n + new_dat[[k]]$n
       run_dat$y <- run_dat$y + new_dat[[k]]$y
     }
+    dat[[k]] <- as_tibble(run_dat)
     
     # Fit model
     moddat <- tidybayes::compose_data(run_dat, model[[2]])
     fit <- rstan::sampling(model[[1]], data = moddat, pars = c("theta", "zeta"), ...)
-    draws <- tidybayes::gather_draws(fit, theta[d], zeta[d]) 
-    dat[[k]] <- as_tibble(run_dat)
+    draws <- tidybayes::gather_draws(fit, theta[d], zeta[d])
     
     
     # Calculate quantities of interest #
@@ -149,6 +150,129 @@ sim_trial <- function(
   ))
 }
 
+
+sim_trial_alt <- function(
+  interim_seq, 
+  p, 
+  model, 
+  epsilon = 0.9, 
+  delta = 0.05,
+  rar = "none",
+  fix_max_dur = 1 / length(p),
+  use_failures = FALSE, 
+  ...) {
+  
+  require(rstan)
+  require(plyr)
+  require(dplyr)
+  require(matrixStats)
+  
+  if(! rar %in% c("none", "med", "mnd")) {
+    message("rar not a valid value, setting to 'none' by default.")
+    rar <- "none"
+  }
+  
+  n_max <- max(interim_seq)
+  n_int <- diff(c(0, interim_seq))
+  K <- length(interim_seq)
+  N <- length(p)
+  
+  if(rar == "mnd" & fix_max_dur == 0) {
+    message("If using rar = 'mnd' should fix_max_dur in (0, 1). Set to 1/N by default")
+    fix_max_dur <- 1/N
+  }
+  
+  alloc_prob <- vector("list", K)
+  new_dat <- vector("list", K)
+  dat <- vector("list", K)
+  theta <- vector("list", K)
+  prob_noninf <- vector("list", K)
+  prob_eff <- vector("list", K)
+  prob_med <- vector("list", K)
+  prob_mnd <- vector("list", K)
+  
+  alloc_prob[[1]] <- rep(1 / N, N)
+  
+  for(k in 1:K) {
+    
+    # Generate data
+    new_dat[[k]] <- sim_dat(n_int, p, alloc_prob[[k]])
+    if(k == 1) {run_dat <- new_dat[[k]]} else {
+      run_dat$n <- run_dat$n + new_dat[[k]]$n
+      run_dat$y <- run_dat$y + new_dat[[k]]$y
+    }
+    dat[[k]] <- as_tibble(run_dat)
+    
+    # Fit model
+    moddat <- tidybayes::compose_data(run_dat, model[[2]])
+    fit <- rstan::sampling(model[[1]], data = moddat, pars = c("theta", "zeta"), ...)
+    draws <- as.matrix(fit, c("theta", "zeta"))
+    
+    
+    # Calculate quantities of interest #
+    #----------------------------------#
+    
+    # Estimate summary
+    theta[[k]] <- as_tibble(
+      apply(draws, 2, function(x) 
+        c(.mean = mean(x), .value = median(x), setNames(HDInterval::hdi(x), c(".lower", ".upper")))), 
+      rownames = "val") %>%
+      gather(key, value, -val) %>%
+      separate(key, c(".variable", "d"), extra = "drop") %>%
+      spread(val, value) %>%
+      mutate(.width = .upper - .lower)
+    
+    # Relative to maximum
+    prob_noninf[[k]] <- enframe(colMeans2(draws[, (N + 1):(2*N - 1)] >= -delta), "d", "prob_noninf") %>%
+      mutate(prob_lagnoninf = lag(prob_noninf, 1, 0))
+    
+    # Efficacy of duration wrt epsilon
+    prob_eff[[k]] <- enframe(colMeans2(draws[, 1:N] >= epsilon), "d", "prob_eff") %>%
+      mutate(prob_lageff = lag(prob_eff, 1, 0))
+    
+    # MED wrt epsilon
+    prob_med[[k]] <- enframe(rowMeans2(apply(draws[, 1:N], 1, function(x) 
+      (x >= epsilon) & c(0, x[-N]) < epsilon)), "d", "prob_med")
+    
+    # MND wrt delta
+    prob_mnd[[k]] <- enframe(rowMeans2(apply(draws[, (N + 1):(2*N - 1)], 1, function(x) 
+      (x >= -delta) & c(-1, x[-(N - 1)]) < -delta)), "d", "prob_mnd")
+
+    # Update allocation ratios according to MED prob
+    # (if ALL prob_med = 0 or ALL prob_eff < alpha, stop?)
+    if(k < K) {
+      if(rar == "none") {
+          alloc_prob[[k + 1]] <- rep(1 / N, N)
+      } else if(rar == "med") {
+          w <- sqrt(prob_med[[k]]$prob_med)
+          alloc_prob[[k + 1]] <- normalise(w)
+      } else if(rar == "mnd") {
+          w <- sqrt(prob_mnd[[k]]$prob_mnd)
+          w <- normalise(w)
+          w[N] <- fix_max_dur
+          w[-N] <- (1 - w[N])*w[-N]
+          alloc_prob[[k + 1]] <- w       
+      }
+    }
+  }
+  
+  return(as_tibble(join_all(list(
+      bind_rows(dat, .id = "Interim"),
+      bind_rows(prob_noninf, .id = "Interim"),
+      bind_rows(prob_eff, .id = "Interim"),
+      bind_rows(prob_med, .id = "Interim"),
+      bind_rows(prob_mnd, .id = "Interim"),
+      bind_rows(lapply(alloc_prob, enframe, "d", "alloc_prob"), .id = "Interim"),
+      bind_rows(theta, .id = "Interim")%>%
+        pivot_wider(names_from = .variable,
+                    values_from = c(.mean, .value, .lower, .upper, .width),
+                    names_sep = "_",
+                    values_fill = list(".mean" = 0, ".value" = 0, ".lower" = 0, ".upper" = 0, ".width" = 0))),
+      by = c("Interim", "d")))
+  )
+}
+
+
 #' Simulate a duration-response trial scenario
 #' 
 #' @param sce_dat The scenario tibble
@@ -164,18 +288,28 @@ sim_scenario <- function(sce_dat, reps, ...) {
                 sim_trial(
                   interim_seq = sce_dat$seq_ss[[i]], 
                   p = sce_dat$p[[i]], 
-                  model = sce_dat$mod[[i]], ...), simplify = F), 
-      "Trial", "Result")
+                  model = sce_dat$mod[[i]],
+                  ...), 
+             simplify = F), "Trial", "Result")
   }, ..., mc.cores = parallel::detectCores() - 1) 
   
   return(bind_cols(sce_dat, enframe(res, "ID", "Sim") %>% select(Sim)))
 }
 
-
-med_stopping_rule <- function(sce, eff_thres, noneff_thres) {
+sim_scenario_alt <- function(sce_dat, reps, ...) {
+  require(parallel)
   
-}
-
-noninf_stopping_rule <- function(sce, noninf_thres) {
+  res <- mclapply(1:nrow(sce_dat), function(i, ...) {
+    tibble::enframe(
+      sapply(1:reps, function(j)
+        sim_trial_alt(
+          interim_seq = sce_dat$seq_ss[[i]], 
+          p = sce_dat$p[[i]], 
+          model = sce_dat$mod[[i]],
+          rar = sce_dat$rar[[i]],
+          ...), simplify = F), 
+      "Trial", "Result")
+  }, ..., mc.cores = parallel::detectCores() - 1) 
   
+  return(bind_cols(sce_dat, enframe(res, "ID", "Sim") %>% select(Sim)))
 }

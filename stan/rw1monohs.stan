@@ -20,17 +20,17 @@ parameters {
 transformed parameters {
   vector[N] eta;
   vector[N] theta;
-  eta[1] = eta1;
+  eta[1] = mu + sigma*eta1;
   for(i in 2:N) {
-    eta[i] = eta[i - 1] + u[i-1];
+    eta[i] = eta[i - 1] + tau[i-1]*u[i-1];
   }
   theta = inv_logit(eta);
 }
 model {
-  eta1 ~ normal(mu, sigma);
+  eta1 ~ normal(0, 1);
   gamma ~ cauchy(0, lambda);
   tau ~ cauchy(0, gamma);
-  u ~ normal(0, tau);
+  u ~ normal(0, 1);
   y ~ binomial_logit(n, eta);
 }
 generated quantities {
