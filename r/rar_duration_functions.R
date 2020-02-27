@@ -157,9 +157,12 @@ sim_trial_alt <- function(
   model, 
   epsilon = 0.9, 
   delta = 0.05,
+  gamma = 0.025,
   rar = "none",
   fix_max_dur = 1 / length(p),
-  use_failures = FALSE, 
+  use_failures = FALSE,
+  approx = FALSE,
+  iter = 3000,
   ...) {
   
   require(rstan)
@@ -190,6 +193,7 @@ sim_trial_alt <- function(
   prob_eff <- vector("list", K)
   prob_med <- vector("list", K)
   prob_mnd <- vector("list", K)
+  prob_close <- vector("list", K)
   
   alloc_prob[[1]] <- rep(1 / N, N)
   
@@ -205,10 +209,14 @@ sim_trial_alt <- function(
     
     # Fit model
     moddat <- tidybayes::compose_data(run_dat, model[[2]])
-    fit <- rstan::sampling(model[[1]], data = moddat, pars = c("theta", "zeta"), ...)
-    draws <- as.matrix(fit, c("theta", "zeta"))
-    
-    
+    if(!approx) {
+      fit <- rstan::sampling(model[[1]], data = moddat, pars = c("theta", "zeta"), ...)
+      draws <- as.matrix(fit, c("theta", "zeta"))     
+    } else {
+      fit <- rstan::optimizing(model[[1]], data = moddat, hessian = TRUE, draws = iter, ...)
+      draws <- fit$theta_tilde[, grepl("(theta|zeta)", colnames(fit$theta_tilde))]
+    }
+
     # Calculate quantities of interest #
     #----------------------------------#
     
@@ -237,6 +245,10 @@ sim_trial_alt <- function(
     # MND wrt delta
     prob_mnd[[k]] <- enframe(rowMeans2(apply(draws[, (N + 1):(2*N - 1)], 1, function(x) 
       (x >= -delta) & c(-1, x[-(N - 1)]) < -delta)), "d", "prob_mnd")
+    
+    # Prob close to target
+    # Efficacy of duration wrt epsilon
+    prob_close[[k]] <- enframe(colMeans2(draws[, 1:N] > epsilon - gamma & draws[, 1:N] < epsilon + gamma), "d", "prob_close")
 
     # Update allocation ratios according to MED prob
     # (if ALL prob_med = 0 or ALL prob_eff < alpha, stop?)
@@ -262,6 +274,7 @@ sim_trial_alt <- function(
       bind_rows(prob_eff, .id = "Interim"),
       bind_rows(prob_med, .id = "Interim"),
       bind_rows(prob_mnd, .id = "Interim"),
+      bind_rows(prob_close, .id = "Interim"),
       bind_rows(lapply(alloc_prob, enframe, "d", "alloc_prob"), .id = "Interim"),
       bind_rows(theta, .id = "Interim")%>%
         pivot_wider(names_from = .variable,
